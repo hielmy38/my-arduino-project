@@ -1,6 +1,7 @@
 # my-arduino-project
 ini code untuk project c.a.p gua di arduino atau MCU lain. (11/9/2026)
 
+
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SH110X.h>
@@ -44,6 +45,17 @@ const unsigned long SENSOR_INTERVAL = 100;
 int invalidReadings = 0;
 
 bool objectDetectedState = false;
+
+// Object motion
+enum ObjectMotion {
+  STATIONARY,
+  APPROACHING,
+  RECEDING
+};
+
+ObjectMotion objectMotion = STATIONARY;
+
+bool eyesSquinting = false;
 
 // ======================================
 // DASHBOARD BUTTON
@@ -104,7 +116,6 @@ enum RobotMode {
 
 RobotMode currentMode = NORMAL_MODE;
 
-// Deklarasi awal fungsi
 void changeMode(RobotMode newMode);
 
 unsigned long interactionTimer = 0;
@@ -113,7 +124,8 @@ unsigned long eyeMovementTimer = 0;
 
 bool interacting = false;
 
-const unsigned long CURIOUS_TIME = 5000;
+const unsigned long NORMAL_IDLE_TIME = 5000;
+const unsigned long CURIOUS_IDLE_TIME = 10000;
 const unsigned long TIRED_TIME = 5000;
 
 const unsigned long EYE_INTERVAL = 700;
@@ -132,6 +144,33 @@ void changeMood(int mood) {
     lastMood = mood;
 
   }
+
+}
+
+// ======================================
+// OBJECT EXPRESSION
+// ======================================
+
+void setEyeSquint(bool state) {
+
+  if (state == eyesSquinting) {
+    return;
+  }
+
+  eyesSquinting = state;
+
+  if (state) {
+
+    // Mata menyipit
+    roboEyes.setHeight(24, 24);
+
+  } else {
+
+    // Mata kembali normal
+    roboEyes.setHeight(38, 38);
+
+  }
+
 }
 
 // ======================================
@@ -175,9 +214,7 @@ void handlePowerButton() {
   int reading = digitalRead(POWER_BUTTON_PIN);
 
   if (reading != lastPowerReading) {
-
     powerDebounceTimer = millis();
-
   }
 
   if (millis() - powerDebounceTimer > POWER_DEBOUNCE) {
@@ -188,50 +225,45 @@ void handlePowerButton() {
 
       if (powerButtonState == LOW) {
 
+        // SHUTDOWN
         if (powerState == POWER_RUNNING) {
 
-  // Sembunyikan dashboard jika sedang aktif
-  infoScreen = false;
+          infoScreen = false;
 
-  // Matikan autoblinker agar tidak mengganggu
-  roboEyes.setAutoblinker(OFF, 3, 2);
+          roboEyes.setAutoblinker(OFF, 2, 1);
+          roboEyes.close();
 
-  // Tutup kedua mata
-  roboEyes.close();
+          powerState = POWER_SHUTDOWN_CLOSING;
+          powerTimer = millis();
 
-  powerState = POWER_SHUTDOWN_CLOSING;
-  powerTimer = millis();
-
-}
+        }
 
         // WAKE UP
         else if (powerState == POWER_OFF) {
 
-          // Reset sensor
           distanceCm = -1;
           rawDistance = -1;
 
           invalidReadings = 0;
           objectDetectedState = false;
+          objectMotion = STATIONARY;
+
+          eyesSquinting = false;
 
           sensorTimer = millis();
 
-          // Reset interaction
           interacting = false;
           interactionTimer = 0;
           idleTimer = millis();
 
-          // Reset dashboard
           infoScreen = false;
           dashboardTimer = 0;
 
-          // Reset robot mode
           currentMode = TIRED_MODE;
           lastMood = -1;
 
-          changeMode (NORMAL_MODE);
+          changeMode(NORMAL_MODE);
 
-          // Show greeting
           showGreeting();
 
           powerState = POWER_WAKE_MESSAGE;
@@ -271,13 +303,9 @@ void updatePowerSequence() {
 
   }
 
-  // ==================================
-  // EYES CLOSING
-  // ==================================
-
+  // Eyes closing
   else if (powerState == POWER_SHUTDOWN_CLOSING) {
 
-    // Terus jalankan animasi penutupan mata
     roboEyes.update();
 
     if (now - powerTimer >= EYE_CLOSE_DURATION) {
@@ -325,7 +353,7 @@ void updatePowerSequence() {
 
     if (now - powerTimer >= MESSAGE_DURATION) {
 
-      roboEyes.setAutoblinker(ON, 3, 2);
+      roboEyes.setAutoblinker(ON, 2, 1);
       roboEyes.open();
 
       powerState = POWER_RUNNING;
@@ -336,10 +364,6 @@ void updatePowerSequence() {
   }
 
 }
-
-  
-
-  
 
 // ======================================
 // SENSOR RELIABILITY
@@ -373,6 +397,7 @@ void readSensor() {
 
     if (invalidReadings >= 3) {
       distanceCm = -1;
+      objectMotion = STATIONARY;
     }
 
     return;
@@ -381,6 +406,9 @@ void readSensor() {
   invalidReadings = 0;
 
   rawDistance = duration * 0.0343 / 2;
+
+  // Save previous distance
+  float oldDistance = distanceCm;
 
   // Exponential smoothing
   if (distanceCm < 0) {
@@ -392,6 +420,31 @@ void readSensor() {
     distanceCm =
       (distanceCm * 0.65) +
       (rawDistance * 0.35);
+
+  }
+
+  // Detect object movement
+  if (oldDistance > 0 && distanceCm > 0) {
+
+    float difference = distanceCm - oldDistance;
+
+    if (difference < -0.35) {
+
+      objectMotion = APPROACHING;
+
+    }
+
+    else if (difference > 0.35) {
+
+      objectMotion = RECEDING;
+
+    }
+
+    else {
+
+      objectMotion = STATIONARY;
+
+    }
 
   }
 
@@ -440,7 +493,8 @@ void changeMode(RobotMode newMode) {
     roboEyes.setSweat(OFF);
     roboEyes.setCuriosity(ON);
 
-    changeMood(HAPPY);
+    // Curious menggunakan ekspresi netral
+    changeMood(DEFAULT);
 
     eyeMovementTimer = millis();
 
@@ -489,14 +543,16 @@ void updateCuriousEyes() {
 // EMOTION INTELLIGENCE
 // ======================================
 
+
 void updateEmotion() {
 
   unsigned long now = millis();
 
-  bool objectDetected = objectDetectedState;
-
+  // ==================================
   // OBJECT DETECTED
-  if (objectDetected) {
+  // ==================================
+
+  if (objectDetectedState) {
 
     idleTimer = 0;
 
@@ -506,34 +562,73 @@ void updateEmotion() {
       interactionTimer = now;
 
       changeMode(NORMAL_MODE);
+      setEyeSquint(false);
 
-      return;
     }
 
     // Interaction exceeds 5 seconds
     if (now - interactionTimer >= TIRED_TIME) {
 
       changeMode(TIRED_MODE);
+      setEyeSquint(false);
+
       return;
 
     }
 
-    changeMode(NORMAL_MODE);
-
+    // Object is extremely close
     if (distanceCm < 5) {
 
+      changeMode(NORMAL_MODE);
+      setEyeSquint(false);
       changeMood(ANGRY);
 
-    } else {
+    }
 
+    // Object moves away
+    else if (objectMotion == RECEDING) {
+
+      changeMode(NORMAL_MODE);
+      setEyeSquint(false);
+      changeMood(HAPPY);
+
+    }
+
+    // Object approaches
+    else if (objectMotion == APPROACHING) {
+
+      changeMode(NORMAL_MODE);
+      setEyeSquint(true);
+      changeMood(DEFAULT);
+
+    }
+
+    // Object stops after approaching
+    else if (eyesSquinting) {
+
+      changeMode(NORMAL_MODE);
+      changeMood(DEFAULT);
+
+    }
+
+    // Object is stationary
+    else {
+
+      changeMode(NORMAL_MODE);
       changeMood(DEFAULT);
 
     }
 
   }
 
+  // ==================================
   // NO OBJECT DETECTED
+  // ==================================
+
   else {
+
+    objectMotion = STATIONARY;
+    setEyeSquint(false);
 
     if (interacting) {
 
@@ -546,21 +641,52 @@ void updateEmotion() {
       idleTimer = now;
     }
 
-    // Curious after 5 seconds
-    if (now - idleTimer >= CURIOUS_TIME) {
+    unsigned long idleDuration = now - idleTimer;
 
-      changeMode(CURIOUS_MODE);
-
-    } else {
+    // 0-5 seconds: HAPPY
+    if (idleDuration < NORMAL_IDLE_TIME) {
 
       changeMode(NORMAL_MODE);
       changeMood(HAPPY);
 
     }
 
+    // 5-10 seconds: NORMAL
+    else if (idleDuration < CURIOUS_IDLE_TIME) {
+
+      changeMode(NORMAL_MODE);
+      changeMood(DEFAULT);
+
+    }
+
+    // After 10 seconds: alternating CURIOUS and NORMAL
+    else {
+
+      unsigned long cycleTime =
+        (idleDuration - CURIOUS_IDLE_TIME) % 10000UL;
+
+      // First 5 seconds: CURIOUS
+      if (cycleTime < 5000UL) {
+
+        changeMode(CURIOUS_MODE);
+
+      }
+
+      // Next 5 seconds: NORMAL
+      else {
+
+        changeMode(NORMAL_MODE);
+        changeMood(DEFAULT);
+
+      }
+
+    }
+
   }
 
 }
+
+
 
 // ======================================
 // DASHBOARD BUTTON
@@ -741,7 +867,7 @@ void loop() {
 
   updatePowerSequence();
 
-  // Stop robot processing during standby/messages
+  // Stop processing during standby/messages
   if (powerState != POWER_RUNNING) {
     return;
   }
